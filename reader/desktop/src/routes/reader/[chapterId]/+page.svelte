@@ -555,6 +555,7 @@
     eyeFilter = getEyeFilter();
     window.addEventListener('keydown', onKey);
     window.addEventListener('mousemove', onBarMouseMove);
+    window.addEventListener('resize', onWindowResize);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const urlSweepTimer = setInterval(refreshExpiredChapterUrls, URL_SWEEP_INTERVAL_MS);
     // Bars start visible so the user can orient, then collapse.
@@ -563,8 +564,10 @@
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('mousemove', onBarMouseMove);
+      window.removeEventListener('resize', onWindowResize);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       clearInterval(urlSweepTimer);
+      clearTimeout(resizeSettleTimer);
       observer?.disconnect();
     };
   });
@@ -857,6 +860,10 @@
     if (frameEls.length === 0 || !scrollRoot) return;
     observer = new IntersectionObserver(
       (entries) => {
+        // Mid-resize the frames reflow under a fixed scrollTop, so
+        // whatever is visible is not where the user was. Letting that
+        // through would also overwrite the saved last-read page.
+        if (resizeAnchorPage != null) return;
         for (const entry of entries) {
           if (entry.isIntersecting && entry.intersectionRatio > 0.5) {
             const idx = Number((entry.target as HTMLElement).dataset.groupIndex);
@@ -876,6 +883,44 @@
     void pageGroups.length;
     if (frameEls.length > 0 && !loading) setupObserver();
   });
+
+  // ---------- keep position across window resizes ----------
+
+  // Every frame is 100vh, so any window resize (lid close, docking to
+  // or undocking from an external monitor, moving to a differently
+  // sized output) changes every frame's height while scrollTop stays
+  // put — the viewport ends up on some other page, possibly in another
+  // loaded chapter, and the observer then persists THAT as the
+  // last-read page. Pin the page that was current when the resize
+  // started and scroll back to it until the size settles.
+  //
+  // Resize events run before intersection observations in the
+  // rendering steps, so the anchor is captured before the observer
+  // sees the reflowed layout.
+  const RESIZE_SETTLE_MS = 250;
+  let resizeAnchorPage: number | null = null;
+  let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function restoreResizeAnchor() {
+    if (resizeAnchorPage == null) return;
+    const target = findGroupContainingPage(pageGroups, resizeAnchorPage);
+    if (target < 0 || !frameEls[target]) return;
+    currentGroup = target;
+    frameEls[target].scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'start' });
+  }
+
+  function onWindowResize() {
+    if (loading || pageGroups.length === 0) return;
+    // Keep the first anchor through a burst of resize events; later
+    // ones would read a currentGroup that is no longer trustworthy.
+    if (resizeAnchorPage == null) resizeAnchorPage = currentPageIndex;
+    requestAnimationFrame(restoreResizeAnchor);
+    clearTimeout(resizeSettleTimer);
+    resizeSettleTimer = setTimeout(() => {
+      restoreResizeAnchor();
+      resizeAnchorPage = null;
+    }, RESIZE_SETTLE_MS);
+  }
 
   function goToGroupIndex(idx: number) {
     if (idx < 0 || idx >= pageGroups.length) return;
