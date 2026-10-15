@@ -50,6 +50,7 @@
   } from '$lib/contentLocale';
   import { withIpcTimeout } from '$lib/ipcTimeout';
   import { getTitleDetail } from '$lib/ipcCommands';
+  import { createReaderResizeAnchor } from '$lib/readerResize';
 
   /** Immutable Set update helpers — Svelte 5 needs a new reference to
    *  notice the change, and `new Set(old).add(x)` was repeated in 6+
@@ -481,6 +482,25 @@
     pageMode === 'double' && visibleChapterId !== 0 && !visibleChapterHasMarkedSpread,
   );
 
+  // Every frame is 100vh, so resizing reflows the stack under a fixed
+  // scrollTop. Preserve the first visible page until the resize burst
+  // settles, and ignore observer updates while that anchor is active.
+  const resizeAnchor = createReaderResizeAnchor({
+    canAnchor: () => !loading && pageGroups.length > 0,
+    getPageIndex: () => currentPageIndex,
+    restorePage: pageIndex => {
+      const target = findGroupContainingPage(pageGroups, pageIndex);
+      const frame = frameEls[target];
+      if (target < 0 || !frame) return;
+      currentGroup = target;
+      frame.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'start' });
+    },
+  });
+
+  function onWindowResize() {
+    resizeAnchor.onResize();
+  }
+
   // ---------- auto-hide bars ----------
 
   // The header and footer overlay the page (position: fixed) so the
@@ -567,7 +587,7 @@
       window.removeEventListener('resize', onWindowResize);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       clearInterval(urlSweepTimer);
-      clearTimeout(resizeSettleTimer);
+      resizeAnchor.cancel();
       observer?.disconnect();
     };
   });
@@ -602,6 +622,7 @@
   });
 
   function resetReaderState() {
+    resizeAnchor.cancel();
     error = '';
     initialViewer = null;
     loadedPages = [];
@@ -863,7 +884,7 @@
         // Mid-resize the frames reflow under a fixed scrollTop, so
         // whatever is visible is not where the user was. Letting that
         // through would also overwrite the saved last-read page.
-        if (resizeAnchorPage != null) return;
+        if (resizeAnchor.active) return;
         for (const entry of entries) {
           if (entry.isIntersecting && entry.intersectionRatio > 0.5) {
             const idx = Number((entry.target as HTMLElement).dataset.groupIndex);
@@ -883,44 +904,6 @@
     void pageGroups.length;
     if (frameEls.length > 0 && !loading) setupObserver();
   });
-
-  // ---------- keep position across window resizes ----------
-
-  // Every frame is 100vh, so any window resize (lid close, docking to
-  // or undocking from an external monitor, moving to a differently
-  // sized output) changes every frame's height while scrollTop stays
-  // put — the viewport ends up on some other page, possibly in another
-  // loaded chapter, and the observer then persists THAT as the
-  // last-read page. Pin the page that was current when the resize
-  // started and scroll back to it until the size settles.
-  //
-  // Resize events run before intersection observations in the
-  // rendering steps, so the anchor is captured before the observer
-  // sees the reflowed layout.
-  const RESIZE_SETTLE_MS = 250;
-  let resizeAnchorPage: number | null = null;
-  let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function restoreResizeAnchor() {
-    if (resizeAnchorPage == null) return;
-    const target = findGroupContainingPage(pageGroups, resizeAnchorPage);
-    if (target < 0 || !frameEls[target]) return;
-    currentGroup = target;
-    frameEls[target].scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'start' });
-  }
-
-  function onWindowResize() {
-    if (loading || pageGroups.length === 0) return;
-    // Keep the first anchor through a burst of resize events; later
-    // ones would read a currentGroup that is no longer trustworthy.
-    if (resizeAnchorPage == null) resizeAnchorPage = currentPageIndex;
-    requestAnimationFrame(restoreResizeAnchor);
-    clearTimeout(resizeSettleTimer);
-    resizeSettleTimer = setTimeout(() => {
-      restoreResizeAnchor();
-      resizeAnchorPage = null;
-    }, RESIZE_SETTLE_MS);
-  }
 
   function goToGroupIndex(idx: number) {
     if (idx < 0 || idx >= pageGroups.length) return;
